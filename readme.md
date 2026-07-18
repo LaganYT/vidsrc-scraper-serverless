@@ -114,3 +114,7 @@ Response Format:
 }
 }
 ```
+
+## Contributions:
+
+Contributions are always welcome. I might not always have the time to update this frequently, so do feel free to create a pull request.
