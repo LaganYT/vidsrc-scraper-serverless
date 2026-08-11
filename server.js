@@ -27,10 +27,10 @@ const PROVIDERS = [
   "https://vidsrcme.ru",
   "https://vidsrcme.su",
   "https://vidsrc-me.ru",
-  "https://vidsrc-me.su",
-  "https://vidsrc-embed.ru",
-  "https://vidsrc-embed.su",
-  "https://vsrc.su"
+  "https://vidsrc.me",
+  "https://vidsrc.io",
+  "https://vidsrc.tw"
+
 
 ];
 
