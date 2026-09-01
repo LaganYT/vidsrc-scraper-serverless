@@ -1,19 +1,18 @@
 # Video Stream Extractor API — Cloudflare Workers
 
-A serverless Cloudflare Worker that extracts HLS (`.m3u8`) and subtitle URLs from VidSrc provider pages using [Cloudflare Browser Run](https://developers.cloudflare.com/browser-run/playwright/).
+A serverless Cloudflare Worker that extracts HLS (`.m3u8`) URLs from VidSrc using ordinary HTTP requests and the provider's WebAssembly stream decryptor. It does not launch Chromium or use Cloudflare Browser Run.
 
 ## Changes in this version
 
-- Replaces Express and local Chromium with a Worker `fetch()` handler and `@cloudflare/playwright`.
-- Uses one Browser Run session per extraction and two isolated browser contexts at a time.
+- Replaces browser automation with a request to the provider's stream-data API.
+- Loads and runs the short-lived WebAssembly decryptor returned by that API.
 - Replaces the process-local cache with Cloudflare's Cache API (15-minute TTL).
 - Replaces Node-only TV subtitle ZIP handling with Worker-compatible Web APIs and `fflate`.
-- Preserves CORS and the extraction/subtitle routes, and adds browser-based `/watch` and `/convert` tools.
-- Closes browser sessions and contexts in `finally` blocks to prevent leaked Browser Run usage.
+- Preserves CORS, the provider-keyed extraction response, and all existing proxy/subtitle/media-page routes.
 
 ## Setup
 
-Requirements: a Cloudflare account with Browser Run enabled, Node.js 18+, and pnpm.
+Requirements: a Cloudflare account, Node.js 18+, and pnpm. Browser Run is not required.
 
 ```bash
 git clone https://github.com/LaganYT/vidsrc-scraper.git
@@ -42,7 +41,7 @@ pnpm check
 pnpm deploy
 ```
 
-`pnpm dev` uses a remote Browser Run binding. The browser binding, `nodejs_compat` flag, and compatibility date are configured in `wrangler.jsonc`.
+The `nodejs_compat` flag and compatibility date are configured in `wrangler.jsonc`.
 
 ## API
 
@@ -99,6 +98,6 @@ Only HTTPS source URLs are accepted.
 
 ## Cloudflare usage
 
-Extraction is browser-intensive. Cloudflare's free plan has limited daily Browser Run time and browser-acquisition limits. This Worker shares one browser across provider contexts to minimize launches, but production traffic may require a paid Workers plan.
+Extraction uses regular Worker subrequests and WebAssembly, so it does not consume Browser Run minutes. The upstream stream-data API and its decryptor are provider-controlled and may change independently.
 
 Make sure your deployment and use comply with provider terms and applicable copyright laws.

@@ -1,6 +1,6 @@
-import { launch } from "@cloudflare/playwright";
 import { getTVSubtitleVTT } from "./tv-subtitles.js";
 import { convertPage, watchPage } from "./media-pages.js";
+import { extractStreams, extractionError } from "./http-extractor.js";
 
 const PROVIDERS = [
   "https://vidsrc2.ru",
@@ -17,8 +17,8 @@ const LANGUAGE_NAMES = { en: "English" };
 const COMMON_LANGUAGES = new Set(Object.keys(LANGUAGE_NAMES));
 const USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36";
 const CORS = { "Access-Control-Allow-Origin": "*", "Access-Control-Allow-Methods": "GET, OPTIONS", "Access-Control-Allow-Headers": "Content-Type" };
-const SKIP_HEADERS = new Set(["host", "connection", "content-length", "accept-encoding", "cache-control", "pragma"]);
-const EXTRACT_CACHE_SCHEMA = "captured-headers-v2";
+const EXTRACT_CACHE_SCHEMA = "fetch-only-v1";
+const tokenCache = new Map();
 
 function reply(body, init = {}) {
   const headers = new Headers(init.headers);
@@ -29,88 +29,57 @@ function json(data, status = 200, headers = {}) {
   return reply(JSON.stringify(data), { status, headers: { "Content-Type": "application/json; charset=utf-8", ...headers } });
 }
 function message(error) { return error instanceof Error ? error.message : String(error); }
-function isSubtitle(url) { return /\.(vtt|srt)(\?.*)?$/i.test(url) || url.includes(".vtt") || url.includes(".srt"); }
-
-async function scrapeProvider(browser, domain, target) {
-  const context = await browser.newContext({ userAgent: USER_AGENT, ignoreHTTPSErrors: true });
-  const page = await context.newPage();
-  let hlsUrl = null;
-  let hlsHeaders = null;
-  const subtitles = new Set();
-  const inspectRequest = (url, headers) => {
-    if (!hlsUrl && url.includes(".m3u8")) {
-      hlsUrl = url;
-      hlsHeaders = {};
-      for (const [key, value] of Object.entries(headers || {})) {
-        if (!SKIP_HEADERS.has(key.toLowerCase())) hlsHeaders[key] = value;
-      }
-    }
-    if (isSubtitle(url)) subtitles.add(url);
-  };
-
-  try {
-    await page.route("**/*", async (route) => {
-      const req = route.request();
-      inspectRequest(req.url(), req.headers());
-
-      // The provider mirrors intentionally navigate CDP-controlled pages to
-      // about:blank from this asset, before the player iframe can be created.
-      if (/\/assets\/disable-devtool(?:\.min)?\.js(?:\?|$)/i.test(req.url())) {
-        await route.abort();
-        return;
-      }
-
-      await route.continue();
-    });
-    page.on("request", (req) => inspectRequest(req.url(), req.headers()));
-    await page.goto(target, { waitUntil: "domcontentloaded", timeout: 20_000 });
-    await page.waitForTimeout(1_500);
-
-    // Official VidSrc domains render the play overlay across the full embed
-    // viewport and no longer expose the old #the_frame element.
-    const viewport = page.viewportSize() || { width: 1280, height: 720 };
-    await page.mouse.click(viewport.width / 2, viewport.height / 2);
-    await page.waitForTimeout(7_000);
-    if (!hlsUrl) await page.waitForResponse((item) => item.url().includes(".m3u8"), { timeout: 5_000 }).catch(() => undefined);
-    if (subtitles.size === 0) await page.waitForTimeout(5_000);
-    if (!hlsUrl) throw new Error("HLS URL not found");
-    console.log(`[${domain}] captured HLS headers:`, JSON.stringify(hlsHeaders));
-    return { hls_url: hlsUrl, hls_headers: hlsHeaders, subtitles: [...subtitles], error: null };
-  } catch (error) {
-    console.error(`[${domain}] ${message(error)}`);
-    return { hls_url: null, subtitles: [], error: message(error) };
-  } finally {
-    await context.close().catch(() => undefined);
-  }
-}
-
-async function mapLimited(items, concurrency, mapper) {
-  const results = new Array(items.length);
-  let next = 0;
-  async function run() {
-    while (next < items.length) { const index = next++; results[index] = await mapper(items[index]); }
-  }
-  await Promise.all(Array.from({ length: Math.min(concurrency, items.length) }, run));
-  return results;
-}
-
 function resolveUrl(uri, base) {
   try { return new URL(uri, base).toString(); }
   catch { return uri; }
 }
 
-function rewriteM3U8(content, baseUrl, proxyBase, headersParam) {
+function isVidSrcCdn(url) { return /\/pl\/[A-Za-z0-9+/=._-]{40,}\//.test(url); }
+function parseToken(value) {
+  const text = value.trim();
+  if (!text) return "";
+  if (text.startsWith("{") || text.startsWith("[")) {
+    try {
+      const data = JSON.parse(text);
+      if (typeof data === "string") return data;
+      return data?.token || data?.data || data?.string || data?.result || "";
+    } catch { return ""; }
+  }
+  return text;
+}
+async function getVidSrcToken(origin, tokenUrl, headers) {
+  const cached = tokenCache.get(origin);
+  if (cached && cached.expiresAt > Date.now()) return cached.token;
+
+  const endpoints = new Set();
+  if (tokenUrl) endpoints.add(tokenUrl);
+  endpoints.add(`${origin}/generate.php`);
+  for (const endpoint of endpoints) {
+    try {
+      const response = await fetch(endpoint, { headers, redirect: "follow" });
+      if (!response.ok) continue;
+      const token = parseToken(await response.text());
+      if (!token) continue;
+      tokenCache.set(origin, { token, expiresAt: Date.now() + 50 * 60 * 1000 });
+      return token;
+    } catch { /* Try the next token endpoint. */ }
+  }
+  return "";
+}
+
+function rewriteM3U8(content, baseUrl, proxyBase, headersParam, tokenUrl) {
   const h = encodeURIComponent(headersParam);
+  const tokenParam = tokenUrl ? `&t=${encodeURIComponent(tokenUrl)}` : "";
   return content.split(/\r?\n/).map((line) => {
     if (line.startsWith("#") && line.includes("URI=")) {
       return line.replace(/URI="([^"]+)"/g, (_, uri) => {
         const absolute = resolveUrl(uri, baseUrl);
-        return `URI="${proxyBase}?url=${encodeURIComponent(absolute)}&h=${h}"`;
+        return `URI="${proxyBase}?url=${encodeURIComponent(absolute)}&h=${h}${tokenParam}"`;
       });
     }
     if (line && !line.startsWith("#")) {
       const absolute = resolveUrl(line.trim(), baseUrl);
-      return `${proxyBase}?url=${encodeURIComponent(absolute)}&h=${h}`;
+      return `${proxyBase}?url=${encodeURIComponent(absolute)}&h=${h}${tokenParam}`;
     }
     return line;
   }).join("\n");
@@ -120,6 +89,7 @@ async function hlsProxy(request) {
   const params = new URL(request.url).searchParams;
   const targetUrl = params.get("url");
   const headersParam = params.get("h");
+  const tokenUrl = params.get("t");
   if (!targetUrl) return reply("Missing url parameter", { status: 400 });
   if (!headersParam && params.has("referer")) {
     return reply("Legacy proxy URL expired; request a fresh hls_url from /extract", { status: 410 });
@@ -144,6 +114,17 @@ async function hlsProxy(request) {
     }
   }
   const headers = { ...forwardHeaders, "User-Agent": USER_AGENT };
+  if (isVidSrcCdn(target.toString())) {
+    let validatedTokenUrl = null;
+    try {
+      if (tokenUrl) {
+        validatedTokenUrl = new URL(tokenUrl);
+        if (validatedTokenUrl.protocol !== "https:") validatedTokenUrl = null;
+      }
+    } catch { validatedTokenUrl = null; }
+    const token = await getVidSrcToken(target.origin, validatedTokenUrl?.toString(), headers);
+    if (token) target.searchParams.set("token", token);
+  }
   console.log(`[hls-proxy] ${target.pathname.slice(0, 60)} forwarding headers:`, Object.keys(headers).join(", "));
 
   try {
@@ -157,7 +138,7 @@ async function hlsProxy(request) {
     if (target.pathname.endsWith(".m3u8") || ct.includes("mpegurl") || ct.includes("m3u8")) {
       const text = await response.text();
       const proxyBase = `${new URL(request.url).origin}/hls-proxy`;
-      return reply(rewriteM3U8(text, target.toString(), proxyBase, headersParam), {
+      return reply(rewriteM3U8(text, target.toString(), proxyBase, headersParam, tokenUrl), {
         headers: { "Content-Type": "application/vnd.apple.mpegurl", "Cache-Control": "no-cache" },
       });
     }
@@ -188,29 +169,34 @@ async function extract(request, env, ctx) {
   const cached = await caches.default.match(key);
   if (cached) return reply(cached.body, { status: cached.status, headers: cached.headers });
 
-  let browser;
   try {
-    browser = await launch(env.BROWSER);
-    const targets = PROVIDERS.map((domain) => [domain, type === "tv"
-      ? `${domain}/embed/tv?tmdb=${encodeURIComponent(tmdbId)}&season=${encodeURIComponent(season)}&episode=${encodeURIComponent(episode)}`
-      : `${domain}/embed/movie/${encodeURIComponent(tmdbId)}`]);
-    const pairs = await mapLimited(targets, 2, async ([domain, target]) => [domain, await scrapeProvider(browser, domain, target)]);
-    const results = Object.fromEntries(pairs);
+    const extracted = await extractStreams({ tmdbId, type, season, episode, userAgent: USER_AGENT });
+    const results = Object.fromEntries(PROVIDERS.map((domain, index) => {
+      const hlsUrl = extracted.streams[index % extracted.streams.length];
+      return [domain, {
+        hls_url: hlsUrl,
+        hls_headers: extracted.headers,
+        token_url: extracted.token_url,
+        subtitles: [],
+        error: null,
+      }];
+    }));
     const proxyBase = `${new URL(request.url).origin}/hls-proxy`;
     for (const [domain, result] of Object.entries(results)) {
       if (result.hls_url) {
         const h = btoa(JSON.stringify(result.hls_headers || {}));
-        result.hls_url = `${proxyBase}?url=${encodeURIComponent(result.hls_url)}&h=${encodeURIComponent(h)}`;
+        const t = result.token_url ? `&t=${encodeURIComponent(result.token_url)}` : "";
+        result.hls_url = `${proxyBase}?url=${encodeURIComponent(result.hls_url)}&h=${encodeURIComponent(h)}${t}`;
       }
       delete result.hls_headers;
+      delete result.token_url;
     }
     const output = json({ success: Object.values(results).some((item) => item.hls_url), results }, 200, { "Cache-Control": "public, max-age=900" });
     ctx.waitUntil(caches.default.put(key, output.clone()));
     return output;
   } catch (error) {
-    return json({ success: false, error: message(error), results: {} }, 500);
-  } finally {
-    if (browser) await browser.close().catch(() => undefined);
+    const results = Object.fromEntries(PROVIDERS.map((domain) => [domain, extractionError(error)]));
+    return json({ success: false, error: message(error), results }, 502);
   }
 }
 
