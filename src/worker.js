@@ -17,6 +17,7 @@ const LANGUAGE_NAMES = { en: "English" };
 const COMMON_LANGUAGES = new Set(Object.keys(LANGUAGE_NAMES));
 const USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36";
 const CORS = { "Access-Control-Allow-Origin": "*", "Access-Control-Allow-Methods": "GET, OPTIONS", "Access-Control-Allow-Headers": "Content-Type" };
+const SKIP_HEADERS = new Set(["host", "connection", "content-length", "accept-encoding", "cache-control", "pragma"]);
 
 function reply(body, init = {}) {
   const headers = new Headers(init.headers);
@@ -33,12 +34,15 @@ async function scrapeProvider(browser, domain, target) {
   const context = await browser.newContext({ userAgent: USER_AGENT, ignoreHTTPSErrors: true });
   const page = await context.newPage();
   let hlsUrl = null;
-  let hlsReferer = null;
+  let hlsHeaders = null;
   const subtitles = new Set();
   const inspectRequest = (url, headers) => {
     if (!hlsUrl && url.includes(".m3u8")) {
       hlsUrl = url;
-      hlsReferer = headers?.["referer"] || null;
+      hlsHeaders = {};
+      for (const [key, value] of Object.entries(headers || {})) {
+        if (!SKIP_HEADERS.has(key.toLowerCase())) hlsHeaders[key] = value;
+      }
     }
     if (isSubtitle(url)) subtitles.add(url);
   };
@@ -69,7 +73,8 @@ async function scrapeProvider(browser, domain, target) {
     if (!hlsUrl) await page.waitForResponse((item) => item.url().includes(".m3u8"), { timeout: 5_000 }).catch(() => undefined);
     if (subtitles.size === 0) await page.waitForTimeout(5_000);
     if (!hlsUrl) throw new Error("HLS URL not found");
-    return { hls_url: hlsUrl, hls_referer: hlsReferer, subtitles: [...subtitles], error: null };
+    console.log(`[${domain}] captured HLS headers:`, JSON.stringify(hlsHeaders));
+    return { hls_url: hlsUrl, hls_headers: hlsHeaders, subtitles: [...subtitles], error: null };
   } catch (error) {
     console.error(`[${domain}] ${message(error)}`);
     return { hls_url: null, subtitles: [], error: message(error) };
@@ -93,17 +98,18 @@ function resolveUrl(uri, base) {
   catch { return uri; }
 }
 
-function rewriteM3U8(content, baseUrl, proxyBase, referer) {
+function rewriteM3U8(content, baseUrl, proxyBase, headersParam) {
+  const h = encodeURIComponent(headersParam);
   return content.split(/\r?\n/).map((line) => {
     if (line.startsWith("#") && line.includes("URI=")) {
       return line.replace(/URI="([^"]+)"/g, (_, uri) => {
         const absolute = resolveUrl(uri, baseUrl);
-        return `URI="${proxyBase}?url=${encodeURIComponent(absolute)}&referer=${encodeURIComponent(referer)}"`;
+        return `URI="${proxyBase}?url=${encodeURIComponent(absolute)}&h=${h}"`;
       });
     }
     if (line && !line.startsWith("#")) {
       const absolute = resolveUrl(line.trim(), baseUrl);
-      return `${proxyBase}?url=${encodeURIComponent(absolute)}&referer=${encodeURIComponent(referer)}`;
+      return `${proxyBase}?url=${encodeURIComponent(absolute)}&h=${h}`;
     }
     return line;
   }).join("\n");
@@ -112,7 +118,7 @@ function rewriteM3U8(content, baseUrl, proxyBase, referer) {
 async function hlsProxy(request) {
   const params = new URL(request.url).searchParams;
   const targetUrl = params.get("url");
-  const referer = params.get("referer") || "";
+  const headersParam = params.get("h") || "";
   if (!targetUrl) return reply("Missing url parameter", { status: 400 });
 
   let target;
@@ -123,21 +129,23 @@ async function hlsProxy(request) {
     return reply(message(error), { status: 400 });
   }
 
-  const headers = { "User-Agent": USER_AGENT, Accept: "*/*" };
-  if (referer) {
-    headers["Referer"] = referer;
-    try { headers["Origin"] = new URL(referer).origin; } catch {}
-  }
+  let forwardHeaders = {};
+  try { forwardHeaders = JSON.parse(atob(headersParam)); } catch {}
+  const headers = { ...forwardHeaders, "User-Agent": USER_AGENT };
+  console.log(`[hls-proxy] ${target.pathname.slice(0, 60)} forwarding headers:`, Object.keys(headers).join(", "));
 
   try {
     const response = await fetch(target, { headers, redirect: "follow" });
-    if (!response.ok) return reply(`Upstream error (${response.status})`, { status: 502 });
+    if (!response.ok) {
+      console.error(`[hls-proxy] upstream ${response.status} for ${target.hostname}${target.pathname.slice(0, 60)}`);
+      return reply(`Upstream error (${response.status})`, { status: 502 });
+    }
 
     const ct = response.headers.get("content-type") || "";
     if (target.pathname.endsWith(".m3u8") || ct.includes("mpegurl") || ct.includes("m3u8")) {
       const text = await response.text();
       const proxyBase = `${new URL(request.url).origin}/hls-proxy`;
-      return reply(rewriteM3U8(text, target.toString(), proxyBase, referer), {
+      return reply(rewriteM3U8(text, target.toString(), proxyBase, headersParam), {
         headers: { "Content-Type": "application/vnd.apple.mpegurl", "Cache-Control": "no-cache" },
       });
     }
@@ -175,10 +183,10 @@ async function extract(request, env, ctx) {
     const proxyBase = `${new URL(request.url).origin}/hls-proxy`;
     for (const [domain, result] of Object.entries(results)) {
       if (result.hls_url) {
-        const referer = result.hls_referer || domain;
-        result.hls_url = `${proxyBase}?url=${encodeURIComponent(result.hls_url)}&referer=${encodeURIComponent(referer)}`;
+        const h = btoa(JSON.stringify(result.hls_headers || {}));
+        result.hls_url = `${proxyBase}?url=${encodeURIComponent(result.hls_url)}&h=${encodeURIComponent(h)}`;
       }
-      delete result.hls_referer;
+      delete result.hls_headers;
     }
     const output = json({ success: Object.values(results).some((item) => item.hls_url), results }, 200, { "Cache-Control": "public, max-age=900" });
     ctx.waitUntil(caches.default.put(key, output.clone()));
