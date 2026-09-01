@@ -1,5 +1,6 @@
 import { launch } from "@cloudflare/playwright";
 import { getTVSubtitleVTT } from "./tv-subtitles.js";
+import { convertPage, watchPage } from "./media-pages.js";
 
 const PROVIDERS = [
   "https://vidsrc2.ru",
@@ -191,7 +192,12 @@ export default {
       case "/movie-subtitles": return movieSubtitles(request, env);
       case "/tv-subtitles": return tvSubtitles(request);
       case "/subtitle-proxy": return subtitleProxy(request);
-      case "/": return reply("VidSrc Scraper API is running on Cloudflare Workers.");
+      case "/watch": return watchPage(request);
+      case "/convert": return convertPage(request);
+      case "/": return json({
+        name: "VidSrc Scraper API",
+        endpoints: ["/extract", "/watch?url=https://…", "/convert?url=https://…", "/movie-subtitles", "/tv-subtitles", "/subtitle-proxy"],
+      });
       default: return json({ error: "Not found" }, 404);
     }
   },
