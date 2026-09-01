@@ -29,7 +29,19 @@ async function scrapeProvider(browser, domain, target) {
   };
 
   try {
-    await page.route("**/*", async (route) => { inspect(route.request().url()); await route.continue(); });
+    await page.route("**/*", async (route) => {
+      const requestUrl = route.request().url();
+      inspect(requestUrl);
+
+      // The provider mirrors intentionally navigate CDP-controlled pages to
+      // about:blank from this asset, before the player iframe can be created.
+      if (/\/assets\/disable-devtool(?:\.min)?\.js(?:\?|$)/i.test(requestUrl)) {
+        await route.abort();
+        return;
+      }
+
+      await route.continue();
+    });
     page.on("request", (request) => inspect(request.url()));
     await page.goto(target, { waitUntil: "domcontentloaded", timeout: 20_000 });
     const frame = await page.waitForSelector("#the_frame", { timeout: 10_000 });
