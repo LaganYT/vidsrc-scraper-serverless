@@ -22,14 +22,17 @@ pnpm install
 cp .dev.vars.example .dev.vars
 ```
 
-Add local API keys to `.dev.vars`, then create the production secrets:
+The Worker does not require any API keys for `/extract`, `/tv-subtitles`, or
+`/subtitle-proxy`. To enable the optional `/movie-subtitles` endpoint, add the
+keys to `.dev.vars` and create the matching production secrets:
 
 ```bash
 pnpm wrangler secret put TMDB_API_KEY
 pnpm wrangler secret put OPENSUB_API_KEY
 ```
 
-The keys are only needed for `/movie-subtitles`.
+Without these secrets, `/movie-subtitles` returns a `501` configuration response
+while every other endpoint continues to work normally.
 
 ## Develop, validate, and deploy
 

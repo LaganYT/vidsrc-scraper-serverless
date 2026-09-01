@@ -1,2 +1,3 @@
+# Optional: only required by /movie-subtitles
 TMDB_API_KEY=
 OPENSUB_API_KEY=

@@ -1,7 +1,17 @@
 import { launch } from "@cloudflare/playwright";
 import { getTVSubtitleVTT } from "./tv-subtitles.js";
 
-const PROVIDERS = ["https://vidsrc2.ru", "https://vidsrc.ir", "https://vidsrcme.ru", "https://vidsrcme.su", "https://vidsrc-me.ru", "https://vidsrc.me", "https://vidsrc.io", "https://vidsrc.tw"];
+const PROVIDERS = [
+  "https://vidsrc2.ru",
+  "https://vidsrc.ir",
+  "https://vidsrcme.ru",
+  "https://vidsrcme.su",
+  "https://vidsrc-me.ru",
+  "https://vidsrc-me.su",
+  "https://vidsrc-embed.ru",
+  "https://vidsrc-embed.su",
+  "https://vsrc.su",
+];
 const LANGUAGE_NAMES = { en: "English" };
 const COMMON_LANGUAGES = new Set(Object.keys(LANGUAGE_NAMES));
 const USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36";
@@ -29,13 +39,27 @@ async function scrapeProvider(browser, domain, target) {
   };
 
   try {
-    await page.route("**/*", async (route) => { inspect(route.request().url()); await route.continue(); });
+    await page.route("**/*", async (route) => {
+      const requestUrl = route.request().url();
+      inspect(requestUrl);
+
+      // The provider mirrors intentionally navigate CDP-controlled pages to
+      // about:blank from this asset, before the player iframe can be created.
+      if (/\/assets\/disable-devtool(?:\.min)?\.js(?:\?|$)/i.test(requestUrl)) {
+        await route.abort();
+        return;
+      }
+
+      await route.continue();
+    });
     page.on("request", (request) => inspect(request.url()));
     await page.goto(target, { waitUntil: "domcontentloaded", timeout: 20_000 });
-    const frame = await page.waitForSelector("#the_frame", { timeout: 10_000 });
-    const box = await frame.boundingBox();
-    if (box) await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
-    else await frame.click({ force: true });
+    await page.waitForTimeout(1_500);
+
+    // Official VidSrc domains render the play overlay across the full embed
+    // viewport and no longer expose the old #the_frame element.
+    const viewport = page.viewportSize() || { width: 1280, height: 720 };
+    await page.mouse.click(viewport.width / 2, viewport.height / 2);
     await page.waitForTimeout(7_000);
     if (!hlsUrl) await page.waitForResponse((item) => item.url().includes(".m3u8"), { timeout: 5_000 }).catch(() => undefined);
     if (subtitles.size === 0) await page.waitForTimeout(5_000);
@@ -116,6 +140,13 @@ async function movieSubtitles(request, env) {
   const type = url.searchParams.get("type") || "movie";
   if (!tmdbId) return json({ success: false, error: "tmdb_id is required" }, 400);
   if (!["movie", "tv"].includes(type)) return json({ success: false, error: "Invalid type" }, 400);
+  if (!env.TMDB_API_KEY || !env.OPENSUB_API_KEY) {
+    return json({
+      success: false,
+      error: "Movie subtitle lookup is not configured",
+      required_secrets: ["TMDB_API_KEY", "OPENSUB_API_KEY"],
+    }, 501);
+  }
   try {
     const id = await imdbId(tmdbId, type, env);
     if (!id) return json({ success: false, error: "IMDb ID not found" }, 404);
