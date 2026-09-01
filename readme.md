@@ -1,11 +1,11 @@
 # Video Stream Extractor API — Cloudflare Workers
 
-A serverless Cloudflare Worker that extracts HLS (`.m3u8`) URLs from VidSrc using ordinary HTTP requests and the provider's WebAssembly stream decryptor. It does not launch Chromium or use Cloudflare Browser Run.
+A serverless Cloudflare Worker that extracts HLS (`.m3u8`) URLs from VidSrc using ordinary HTTP requests and JavaScript. It does not launch Chromium or use Cloudflare Browser Run.
 
 ## Changes in this version
 
 - Replaces browser automation with a request to the provider's stream-data API.
-- Loads and runs the short-lived WebAssembly decryptor returned by that API.
+- Reads the short-lived decryptor metadata returned by that API and performs the compatible ChaCha20 operation in JavaScript, without compiling WebAssembly at runtime.
 - Replaces the process-local cache with Cloudflare's Cache API (15-minute TTL).
 - Replaces Node-only TV subtitle ZIP handling with Worker-compatible Web APIs and `fflate`.
 - Preserves CORS, the provider-keyed extraction response, and all existing proxy/subtitle/media-page routes.
@@ -98,6 +98,6 @@ Only HTTPS source URLs are accepted.
 
 ## Cloudflare usage
 
-Extraction uses regular Worker subrequests and WebAssembly, so it does not consume Browser Run minutes. The upstream stream-data API and its decryptor are provider-controlled and may change independently.
+Extraction uses regular Worker subrequests and JavaScript, so it does not consume Browser Run minutes or require runtime WebAssembly compilation. The upstream stream-data API and its decryptor metadata are provider-controlled and may change independently.
 
 Make sure your deployment and use comply with provider terms and applicable copyright laws.
