@@ -33,27 +33,31 @@ async function scrapeProvider(browser, domain, target) {
   const context = await browser.newContext({ userAgent: USER_AGENT, ignoreHTTPSErrors: true });
   const page = await context.newPage();
   let hlsUrl = null;
+  let hlsReferer = null;
   const subtitles = new Set();
-  const inspect = (url) => {
-    if (!hlsUrl && url.includes(".m3u8")) hlsUrl = url;
+  const inspectRequest = (url, headers) => {
+    if (!hlsUrl && url.includes(".m3u8")) {
+      hlsUrl = url;
+      hlsReferer = headers?.["referer"] || null;
+    }
     if (isSubtitle(url)) subtitles.add(url);
   };
 
   try {
     await page.route("**/*", async (route) => {
-      const requestUrl = route.request().url();
-      inspect(requestUrl);
+      const req = route.request();
+      inspectRequest(req.url(), req.headers());
 
       // The provider mirrors intentionally navigate CDP-controlled pages to
       // about:blank from this asset, before the player iframe can be created.
-      if (/\/assets\/disable-devtool(?:\.min)?\.js(?:\?|$)/i.test(requestUrl)) {
+      if (/\/assets\/disable-devtool(?:\.min)?\.js(?:\?|$)/i.test(req.url())) {
         await route.abort();
         return;
       }
 
       await route.continue();
     });
-    page.on("request", (request) => inspect(request.url()));
+    page.on("request", (req) => inspectRequest(req.url(), req.headers()));
     await page.goto(target, { waitUntil: "domcontentloaded", timeout: 20_000 });
     await page.waitForTimeout(1_500);
 
@@ -65,7 +69,7 @@ async function scrapeProvider(browser, domain, target) {
     if (!hlsUrl) await page.waitForResponse((item) => item.url().includes(".m3u8"), { timeout: 5_000 }).catch(() => undefined);
     if (subtitles.size === 0) await page.waitForTimeout(5_000);
     if (!hlsUrl) throw new Error("HLS URL not found");
-    return { hls_url: hlsUrl, subtitles: [...subtitles], error: null };
+    return { hls_url: hlsUrl, hls_referer: hlsReferer, subtitles: [...subtitles], error: null };
   } catch (error) {
     console.error(`[${domain}] ${message(error)}`);
     return { hls_url: null, subtitles: [], error: message(error) };
@@ -82,6 +86,68 @@ async function mapLimited(items, concurrency, mapper) {
   }
   await Promise.all(Array.from({ length: Math.min(concurrency, items.length) }, run));
   return results;
+}
+
+function resolveUrl(uri, base) {
+  try { return new URL(uri, base).toString(); }
+  catch { return uri; }
+}
+
+function rewriteM3U8(content, baseUrl, proxyBase, referer) {
+  return content.split(/\r?\n/).map((line) => {
+    if (line.startsWith("#") && line.includes("URI=")) {
+      return line.replace(/URI="([^"]+)"/g, (_, uri) => {
+        const absolute = resolveUrl(uri, baseUrl);
+        return `URI="${proxyBase}?url=${encodeURIComponent(absolute)}&referer=${encodeURIComponent(referer)}"`;
+      });
+    }
+    if (line && !line.startsWith("#")) {
+      const absolute = resolveUrl(line.trim(), baseUrl);
+      return `${proxyBase}?url=${encodeURIComponent(absolute)}&referer=${encodeURIComponent(referer)}`;
+    }
+    return line;
+  }).join("\n");
+}
+
+async function hlsProxy(request) {
+  const params = new URL(request.url).searchParams;
+  const targetUrl = params.get("url");
+  const referer = params.get("referer") || "";
+  if (!targetUrl) return reply("Missing url parameter", { status: 400 });
+
+  let target;
+  try {
+    target = new URL(targetUrl);
+    if (target.protocol !== "https:") throw new Error("Only HTTPS URLs are allowed");
+  } catch (error) {
+    return reply(message(error), { status: 400 });
+  }
+
+  const headers = { "User-Agent": USER_AGENT, Accept: "*/*" };
+  if (referer) {
+    headers["Referer"] = referer;
+    try { headers["Origin"] = new URL(referer).origin; } catch {}
+  }
+
+  try {
+    const response = await fetch(target, { headers, redirect: "follow" });
+    if (!response.ok) return reply(`Upstream error (${response.status})`, { status: 502 });
+
+    const ct = response.headers.get("content-type") || "";
+    if (target.pathname.endsWith(".m3u8") || ct.includes("mpegurl") || ct.includes("m3u8")) {
+      const text = await response.text();
+      const proxyBase = `${new URL(request.url).origin}/hls-proxy`;
+      return reply(rewriteM3U8(text, target.toString(), proxyBase, referer), {
+        headers: { "Content-Type": "application/vnd.apple.mpegurl", "Cache-Control": "no-cache" },
+      });
+    }
+
+    return reply(response.body, {
+      headers: { "Content-Type": ct || "application/octet-stream" },
+    });
+  } catch (error) {
+    return reply(`Proxy error: ${message(error)}`, { status: 502 });
+  }
 }
 
 async function extract(request, env, ctx) {
@@ -106,6 +172,14 @@ async function extract(request, env, ctx) {
       : `${domain}/embed/movie/${encodeURIComponent(tmdbId)}`]);
     const pairs = await mapLimited(targets, 2, async ([domain, target]) => [domain, await scrapeProvider(browser, domain, target)]);
     const results = Object.fromEntries(pairs);
+    const proxyBase = `${new URL(request.url).origin}/hls-proxy`;
+    for (const [domain, result] of Object.entries(results)) {
+      if (result.hls_url) {
+        const referer = result.hls_referer || domain;
+        result.hls_url = `${proxyBase}?url=${encodeURIComponent(result.hls_url)}&referer=${encodeURIComponent(referer)}`;
+      }
+      delete result.hls_referer;
+    }
     const output = json({ success: Object.values(results).some((item) => item.hls_url), results }, 200, { "Cache-Control": "public, max-age=900" });
     ctx.waitUntil(caches.default.put(key, output.clone()));
     return output;
@@ -189,6 +263,7 @@ export default {
     if (request.method !== "GET") return json({ error: "Method not allowed" }, 405, { Allow: "GET, OPTIONS" });
     switch (new URL(request.url).pathname) {
       case "/extract": return extract(request, env, ctx);
+      case "/hls-proxy": return hlsProxy(request);
       case "/movie-subtitles": return movieSubtitles(request, env);
       case "/tv-subtitles": return tvSubtitles(request);
       case "/subtitle-proxy": return subtitleProxy(request);
@@ -196,7 +271,7 @@ export default {
       case "/convert": return convertPage(request);
       case "/": return json({
         name: "VidSrc Scraper API",
-        endpoints: ["/extract", "/watch?url=https://…", "/convert?url=https://…", "/movie-subtitles", "/tv-subtitles", "/subtitle-proxy"],
+        endpoints: ["/extract", "/hls-proxy?url=https://…", "/watch?url=https://…", "/convert?url=https://…", "/movie-subtitles", "/tv-subtitles", "/subtitle-proxy"],
       });
       default: return json({ error: "Not found" }, 404);
     }
