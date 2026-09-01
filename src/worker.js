@@ -54,10 +54,12 @@ async function scrapeProvider(browser, domain, target) {
     });
     page.on("request", (request) => inspect(request.url()));
     await page.goto(target, { waitUntil: "domcontentloaded", timeout: 20_000 });
-    const frame = await page.waitForSelector("#the_frame", { timeout: 10_000 });
-    const box = await frame.boundingBox();
-    if (box) await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
-    else await frame.click({ force: true });
+    await page.waitForTimeout(1_500);
+
+    // Official VidSrc domains render the play overlay across the full embed
+    // viewport and no longer expose the old #the_frame element.
+    const viewport = page.viewportSize() || { width: 1280, height: 720 };
+    await page.mouse.click(viewport.width / 2, viewport.height / 2);
     await page.waitForTimeout(7_000);
     if (!hlsUrl) await page.waitForResponse((item) => item.url().includes(".m3u8"), { timeout: 5_000 }).catch(() => undefined);
     if (subtitles.size === 0) await page.waitForTimeout(5_000);
@@ -138,6 +140,13 @@ async function movieSubtitles(request, env) {
   const type = url.searchParams.get("type") || "movie";
   if (!tmdbId) return json({ success: false, error: "tmdb_id is required" }, 400);
   if (!["movie", "tv"].includes(type)) return json({ success: false, error: "Invalid type" }, 400);
+  if (!env.TMDB_API_KEY || !env.OPENSUB_API_KEY) {
+    return json({
+      success: false,
+      error: "Movie subtitle lookup is not configured",
+      required_secrets: ["TMDB_API_KEY", "OPENSUB_API_KEY"],
+    }, 501);
+  }
   try {
     const id = await imdbId(tmdbId, type, env);
     if (!id) return json({ success: false, error: "IMDb ID not found" }, 404);
