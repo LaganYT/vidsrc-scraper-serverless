@@ -18,6 +18,7 @@ const COMMON_LANGUAGES = new Set(Object.keys(LANGUAGE_NAMES));
 const USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36";
 const CORS = { "Access-Control-Allow-Origin": "*", "Access-Control-Allow-Methods": "GET, OPTIONS", "Access-Control-Allow-Headers": "Content-Type" };
 const SKIP_HEADERS = new Set(["host", "connection", "content-length", "accept-encoding", "cache-control", "pragma"]);
+const EXTRACT_CACHE_SCHEMA = "captured-headers-v2";
 
 function reply(body, init = {}) {
   const headers = new Headers(init.headers);
@@ -118,8 +119,11 @@ function rewriteM3U8(content, baseUrl, proxyBase, headersParam) {
 async function hlsProxy(request) {
   const params = new URL(request.url).searchParams;
   const targetUrl = params.get("url");
-  const headersParam = params.get("h") || "";
+  const headersParam = params.get("h");
   if (!targetUrl) return reply("Missing url parameter", { status: 400 });
+  if (!headersParam && params.has("referer")) {
+    return reply("Legacy proxy URL expired; request a fresh hls_url from /extract", { status: 410 });
+  }
 
   let target;
   try {
@@ -130,7 +134,15 @@ async function hlsProxy(request) {
   }
 
   let forwardHeaders = {};
-  try { forwardHeaders = JSON.parse(atob(headersParam)); } catch {}
+  if (headersParam) {
+    try {
+      const parsed = JSON.parse(atob(headersParam));
+      if (!parsed || Array.isArray(parsed) || typeof parsed !== "object") throw new Error("Headers must be an object");
+      forwardHeaders = parsed;
+    } catch {
+      return reply("Invalid h parameter; request a fresh hls_url from /extract", { status: 400 });
+    }
+  }
   const headers = { ...forwardHeaders, "User-Agent": USER_AGENT };
   console.log(`[hls-proxy] ${target.pathname.slice(0, 60)} forwarding headers:`, Object.keys(headers).join(", "));
 
@@ -168,7 +180,11 @@ async function extract(request, env, ctx) {
   if (!["movie", "tv"].includes(type)) return json({ success: false, error: 'type must be "movie" or "tv"', results: {} }, 400);
   if (type === "tv" && (!season || !episode)) return json({ success: false, error: "season and episode query params are required for TV shows", results: {} }, 400);
 
-  const key = new Request(url.toString());
+  // Version the cache key whenever the shape or semantics of extracted URLs change.
+  // This prevents a new deployment from serving legacy proxy URLs until TTL expiry.
+  const cacheUrl = new URL(url);
+  cacheUrl.searchParams.set("_schema", EXTRACT_CACHE_SCHEMA);
+  const key = new Request(cacheUrl.toString());
   const cached = await caches.default.match(key);
   if (cached) return reply(cached.body, { status: cached.status, headers: cached.headers });
 
