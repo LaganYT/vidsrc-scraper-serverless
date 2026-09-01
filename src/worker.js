@@ -1,7 +1,17 @@
 import { launch } from "@cloudflare/playwright";
 import { getTVSubtitleVTT } from "./tv-subtitles.js";
 
-const PROVIDERS = ["https://vidsrc2.ru", "https://vidsrc.ir", "https://vidsrcme.ru", "https://vidsrcme.su", "https://vidsrc-me.ru", "https://vidsrc.me", "https://vidsrc.io", "https://vidsrc.tw"];
+const PROVIDERS = [
+  "https://vidsrc2.ru",
+  "https://vidsrc.ir",
+  "https://vidsrcme.ru",
+  "https://vidsrcme.su",
+  "https://vidsrc-me.ru",
+  "https://vidsrc-me.su",
+  "https://vidsrc-embed.ru",
+  "https://vidsrc-embed.su",
+  "https://vsrc.su",
+];
 const LANGUAGE_NAMES = { en: "English" };
 const COMMON_LANGUAGES = new Set(Object.keys(LANGUAGE_NAMES));
 const USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36";
