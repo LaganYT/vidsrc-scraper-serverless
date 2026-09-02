@@ -166,7 +166,8 @@ async function extract(request, env, ctx) {
   const cacheUrl = new URL(url);
   cacheUrl.searchParams.set("_schema", EXTRACT_CACHE_SCHEMA);
   const key = new Request(cacheUrl.toString());
-  const cached = await caches.default.match(key);
+  const cache = globalThis.caches?.default;
+  const cached = cache ? await cache.match(key) : null;
   if (cached) return reply(cached.body, { status: cached.status, headers: cached.headers });
 
   try {
@@ -192,7 +193,7 @@ async function extract(request, env, ctx) {
       delete result.token_url;
     }
     const output = json({ success: Object.values(results).some((item) => item.hls_url), results }, 200, { "Cache-Control": "public, max-age=900" });
-    ctx.waitUntil(caches.default.put(key, output.clone()));
+    if (cache) ctx.waitUntil(cache.put(key, output.clone()));
     return output;
   } catch (error) {
     const results = Object.fromEntries(PROVIDERS.map((domain) => [domain, extractionError(error)]));
@@ -267,23 +268,23 @@ async function subtitleProxy(request) {
   } catch { return reply("Failed to convert subtitle", { status: 502 }); }
 }
 
-export default {
-  async fetch(request, env, ctx) {
-    if (request.method === "OPTIONS") return reply(null, { status: 204 });
-    if (request.method !== "GET") return json({ error: "Method not allowed" }, 405, { Allow: "GET, OPTIONS" });
-    switch (new URL(request.url).pathname) {
-      case "/extract": return extract(request, env, ctx);
-      case "/hls-proxy": return hlsProxy(request);
-      case "/movie-subtitles": return movieSubtitles(request, env);
-      case "/tv-subtitles": return tvSubtitles(request);
-      case "/subtitle-proxy": return subtitleProxy(request);
-      case "/watch": return watchPage(request);
-      case "/convert": return convertPage(request);
-      case "/": return json({
-        name: "VidSrc Scraper API",
-        endpoints: ["/extract", "/hls-proxy?url=https://…", "/watch?url=https://…", "/convert?url=https://…", "/movie-subtitles", "/tv-subtitles", "/subtitle-proxy"],
-      });
-      default: return json({ error: "Not found" }, 404);
-    }
-  },
-};
+export async function handleRequest(request, env = {}, ctx = { waitUntil() {} }) {
+  if (request.method === "OPTIONS") return reply(null, { status: 204 });
+  if (request.method !== "GET") return json({ error: "Method not allowed" }, 405, { Allow: "GET, OPTIONS" });
+  switch (new URL(request.url).pathname) {
+    case "/extract": return extract(request, env, ctx);
+    case "/hls-proxy": return hlsProxy(request);
+    case "/movie-subtitles": return movieSubtitles(request, env);
+    case "/tv-subtitles": return tvSubtitles(request);
+    case "/subtitle-proxy": return subtitleProxy(request);
+    case "/watch": return watchPage(request);
+    case "/convert": return convertPage(request);
+    case "/": return json({
+      name: "VidSrc Scraper API",
+      endpoints: ["/extract", "/hls-proxy?url=https://…", "/watch?url=https://…", "/convert?url=https://…", "/movie-subtitles", "/tv-subtitles", "/subtitle-proxy"],
+    });
+    default: return json({ error: "Not found" }, 404);
+  }
+}
+
+export default { fetch: handleRequest };
