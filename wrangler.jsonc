@@ -1,7 +1,7 @@
 {
   "$schema": "./node_modules/wrangler/config-schema.json",
   "name": "vidsrc-scraper",
-  "main": "src/worker.js",
+  "main": "src/cloudflare-worker.js",
   "compatibility_date": "2026-09-01",
   "compatibility_flags": ["nodejs_compat"],
   "workers_dev": true,
