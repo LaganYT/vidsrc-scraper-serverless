@@ -48,20 +48,93 @@ export function watchPage(request) {
   catch (error) { return new Response(error.message, { status: 400 }); }
   const nonce = crypto.randomUUID().replaceAll("-", "");
   return html(`<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>Stream player</title><style nonce="${nonce}">${STYLE}</style></head>
-  <body><h1>Stream player</h1><p id="status">Loading stream…</p><video id="player" controls playsinline></video>
+  <body><h1>Stream player</h1><p id="status">Loading stream…</p><video id="player" controls playsinline preload="metadata"></video>
   <script nonce="${nonce}" src="https://cdn.jsdelivr.net/npm/hls.js@1/dist/hls.min.js"></script>
   <script nonce="${nonce}">
     const source = ${safeJson(source)};
     const video = document.querySelector('#player');
     const status = document.querySelector('#status');
-    const isHls = new URL(source).pathname.toLowerCase().endsWith('.m3u8');
-    if (!isHls || video.canPlayType('application/vnd.apple.mpegurl')) {
-      video.src = source; status.textContent = isHls ? 'Using native HLS playback.' : 'MP4 stream ready.';
+    const parsed = new URL(source);
+    const isProxyHls = parsed.origin === location.origin && parsed.pathname === '/hls-proxy';
+    const isDirectProviderHls = !isProxyHls && parsed.pathname.includes('/pl/');
+    const isHls = isProxyHls || isDirectProviderHls || /\\.m3u8(?:$|[?#])/i.test(parsed.pathname + parsed.search + parsed.hash);
+
+    function useNative(message) {
+      video.src = source;
+      status.textContent = message;
+      video.addEventListener('loadedmetadata', () => {
+        status.textContent = 'Stream metadata loaded. Starting playback…';
+      }, { once: true });
+      video.addEventListener('canplay', () => {
+        status.textContent = 'Stream ready.';
+      }, { once: true });
+      video.addEventListener('playing', () => {
+        status.textContent = 'Playing stream.';
+      }, { once: true });
+      video.addEventListener('error', () => {
+        const code = video.error ? video.error.code : 0;
+        status.textContent = 'Native playback failed' + (code ? ' (media error ' + code + ')' : '') + '.';
+      }, { once: true });
+    }
+
+    // VidSrc CDN segment URLs reject CORS requests carrying an Origin header.
+    // Native <video> playback fetches them as media/no-cors requests instead,
+    // which keeps the bytes browser-to-CDN and avoids Worker origin transfer.
+    if (isDirectProviderHls) {
+      useNative('Using direct/native HLS playback.');
+    } else if (!isHls) {
+      useNative('Video stream ready.');
+    } else if (video.canPlayType('application/vnd.apple.mpegurl') || video.canPlayType('application/x-mpegURL')) {
+      useNative('Using native HLS playback.');
     } else if (window.Hls && Hls.isSupported()) {
-      const hls = new Hls(); hls.loadSource(source); hls.attachMedia(video);
-      hls.on(Hls.Events.MANIFEST_PARSED, () => { status.textContent = 'HLS stream ready.'; });
-      hls.on(Hls.Events.ERROR, (_, data) => { if (data.fatal) status.textContent = 'Playback failed: ' + data.details; });
-    } else status.textContent = 'This browser cannot play HLS.';
+      const hls = new Hls({
+        enableWorker: true,
+        lowLatencyMode: false,
+        backBufferLength: 90,
+        manifestLoadingMaxRetry: 4,
+        levelLoadingMaxRetry: 4,
+        fragLoadingMaxRetry: 6,
+      });
+      window.__hlsPlayer = hls;
+      let networkRecoveries = 0;
+      let mediaRecoveries = 0;
+      hls.attachMedia(video);
+      hls.on(Hls.Events.MEDIA_ATTACHED, () => {
+        status.textContent = 'Loading HLS manifest…';
+        hls.loadSource(source);
+      });
+      hls.on(Hls.Events.MANIFEST_PARSED, (_, data) => {
+        const count = data && data.levels ? data.levels.length : 0;
+        status.textContent = count > 1 ? 'HLS stream ready (' + count + ' quality levels).' : 'HLS stream ready.';
+      });
+      hls.on(Hls.Events.ERROR, (_, data) => {
+        if (!data || !data.fatal) return;
+        if (data.type === Hls.ErrorTypes.NETWORK_ERROR && networkRecoveries < 2) {
+          networkRecoveries += 1;
+          status.textContent = 'Network error; retrying stream…';
+          hls.startLoad();
+          return;
+        }
+        if (data.type === Hls.ErrorTypes.MEDIA_ERROR && mediaRecoveries < 2) {
+          mediaRecoveries += 1;
+          status.textContent = 'Media error; recovering playback…';
+          hls.recoverMediaError();
+          return;
+        }
+        const detail = data.details || (data.response && data.response.code ? 'HTTP ' + data.response.code : 'unknown HLS error');
+        status.textContent = 'Playback failed: ' + detail;
+        hls.destroy();
+      });
+      video.addEventListener('playing', () => {
+        status.textContent = 'Playing HLS stream.';
+      }, { once: true });
+    } else {
+      status.textContent = 'This browser cannot play HLS.';
+    }
+
+    window.addEventListener('pagehide', () => {
+      if (window.__hlsPlayer) window.__hlsPlayer.destroy();
+    }, { once: true });
   </script></body></html>`, nonce);
 }
 
