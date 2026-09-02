@@ -68,18 +68,18 @@ async function getVidSrcToken(origin, tokenUrl, headers) {
 }
 
 function rewriteM3U8(content, baseUrl, proxyBase, headersParam, tokenUrl) {
-  const h = encodeURIComponent(headersParam);
+  const headersSuffix = headersParam ? `&h=${encodeURIComponent(headersParam)}` : "";
   const tokenParam = tokenUrl ? `&t=${encodeURIComponent(tokenUrl)}` : "";
   return content.split(/\r?\n/).map((line) => {
     if (line.startsWith("#") && line.includes("URI=")) {
       return line.replace(/URI="([^"]+)"/g, (_, uri) => {
         const absolute = resolveUrl(uri, baseUrl);
-        return `URI="${proxyBase}?url=${encodeURIComponent(absolute)}&h=${h}${tokenParam}"`;
+        return `URI="${proxyBase}?url=${encodeURIComponent(absolute)}${headersSuffix}${tokenParam}"`;
       });
     }
     if (line && !line.startsWith("#")) {
       const absolute = resolveUrl(line.trim(), baseUrl);
-      return `${proxyBase}?url=${encodeURIComponent(absolute)}&h=${h}${tokenParam}`;
+      return `${proxyBase}?url=${encodeURIComponent(absolute)}${headersSuffix}${tokenParam}`;
     }
     return line;
   }).join("\n");
