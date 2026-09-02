@@ -46,21 +46,35 @@ export function watchPage(request) {
   let source;
   try { source = sourceFrom(request); }
   catch (error) { return new Response(error.message, { status: 400 }); }
+  const pageUrl = new URL(request.url);
+  const headersParam = pageUrl.searchParams.get("h") || "";
+  const tokenParam = pageUrl.searchParams.get("t") || "";
   const nonce = crypto.randomUUID().replaceAll("-", "");
   return html(`<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>Stream player</title><style nonce="${nonce}">${STYLE}</style></head>
   <body><h1>Stream player</h1><p id="status">Loading stream…</p><video id="player" controls playsinline preload="metadata"></video>
   <script nonce="${nonce}" src="https://cdn.jsdelivr.net/npm/hls.js@1/dist/hls.min.js"></script>
   <script nonce="${nonce}">
-    const source = ${safeJson(source)};
+    const originalSource = ${safeJson(source)};
+    const forwardedHeaders = ${safeJson(headersParam)};
+    const suppliedTokenUrl = ${safeJson(tokenParam)};
     const video = document.querySelector('#player');
     const status = document.querySelector('#status');
-    const parsed = new URL(source);
+    const parsed = new URL(originalSource);
     const isProxyHls = parsed.origin === location.origin && parsed.pathname === '/hls-proxy';
     const isDirectProviderHls = !isProxyHls && parsed.pathname.includes('/pl/');
     const isHls = isProxyHls || isDirectProviderHls || /\\.m3u8(?:$|[?#])/i.test(parsed.pathname + parsed.search + parsed.hash);
+    const nativeHls = Boolean(video.canPlayType('application/vnd.apple.mpegurl') || video.canPlayType('application/x-mpegURL'));
 
-    function useNative(message) {
-      video.src = source;
+    function localProxyFor(url) {
+      const proxy = new URL('/hls-proxy', location.origin);
+      proxy.searchParams.set('url', url);
+      if (forwardedHeaders) proxy.searchParams.set('h', forwardedHeaders);
+      proxy.searchParams.set('t', suppliedTokenUrl || new URL('/generate.php', parsed.origin).toString());
+      return proxy.toString();
+    }
+
+    function useNative(url, message) {
+      video.src = url;
       status.textContent = message;
       video.addEventListener('loadedmetadata', () => {
         status.textContent = 'Stream metadata loaded. Starting playback…';
@@ -77,16 +91,11 @@ export function watchPage(request) {
       }, { once: true });
     }
 
-    // VidSrc CDN segment URLs reject CORS requests carrying an Origin header.
-    // Native <video> playback fetches them as media/no-cors requests instead,
-    // which keeps the bytes browser-to-CDN and avoids Worker origin transfer.
-    if (isDirectProviderHls) {
-      useNative('Using direct/native HLS playback.');
-    } else if (!isHls) {
-      useNative('Video stream ready.');
-    } else if (video.canPlayType('application/vnd.apple.mpegurl') || video.canPlayType('application/x-mpegURL')) {
-      useNative('Using native HLS playback.');
-    } else if (window.Hls && Hls.isSupported()) {
+    function useHlsJs(url, message) {
+      if (!(window.Hls && Hls.isSupported())) {
+        status.textContent = 'This browser cannot play HLS.';
+        return;
+      }
       const hls = new Hls({
         enableWorker: true,
         lowLatencyMode: false,
@@ -100,8 +109,8 @@ export function watchPage(request) {
       let mediaRecoveries = 0;
       hls.attachMedia(video);
       hls.on(Hls.Events.MEDIA_ATTACHED, () => {
-        status.textContent = 'Loading HLS manifest…';
-        hls.loadSource(source);
+        status.textContent = message;
+        hls.loadSource(url);
       });
       hls.on(Hls.Events.MANIFEST_PARSED, (_, data) => {
         const count = data && data.levels ? data.levels.length : 0;
@@ -128,8 +137,21 @@ export function watchPage(request) {
       video.addEventListener('playing', () => {
         status.textContent = 'Playing HLS stream.';
       }, { once: true });
+    }
+
+    if (!isHls) {
+      useNative(originalSource, 'Video stream ready.');
+    } else if (isDirectProviderHls && nativeHls) {
+      // Safari and other browsers with real native HLS can stay browser-to-CDN.
+      useNative(originalSource, 'Using direct/native HLS playback.');
+    } else if (isDirectProviderHls) {
+      // Chromium/Firefox hls.js uses CORS XHR/fetch for media fragments. This
+      // provider rejects those requests, so use the same-origin HLS proxy.
+      useHlsJs(localProxyFor(originalSource), 'Loading HLS through compatibility proxy…');
+    } else if (nativeHls) {
+      useNative(originalSource, 'Using native HLS playback.');
     } else {
-      status.textContent = 'This browser cannot play HLS.';
+      useHlsJs(originalSource, 'Loading HLS manifest…');
     }
 
     window.addEventListener('pagehide', () => {
