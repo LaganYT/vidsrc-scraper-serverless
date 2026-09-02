@@ -10,10 +10,18 @@ function html(body, nonce) {
 }
 
 function sourceFrom(request) {
-  const raw = new URL(request.url).searchParams.get("url");
+  const pageUrl = new URL(request.url);
+  const raw = pageUrl.searchParams.get("url");
   if (!raw) throw new Error("Missing url query parameter");
   const source = new URL(raw);
   if (source.protocol !== "https:") throw new Error("Only HTTPS media URLs are allowed");
+  if (source.origin === pageUrl.origin && source.pathname === "/hls-proxy") {
+    for (const name of ["h", "t"]) {
+      if (!source.searchParams.has(name) && pageUrl.searchParams.has(name)) {
+        source.searchParams.set(name, pageUrl.searchParams.get(name));
+      }
+    }
+  }
   return source.toString();
 }
 
