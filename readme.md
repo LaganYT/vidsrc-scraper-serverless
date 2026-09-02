@@ -1,6 +1,6 @@
-# Video Stream Extractor API — Cloudflare Workers
+# Video Stream Extractor API — Cloudflare Workers or Vercel
 
-A serverless Cloudflare Worker that extracts HLS (`.m3u8`) URLs from VidSrc using ordinary HTTP requests and JavaScript. It does not launch Chromium or use Cloudflare Browser Run.
+A serverless API for Cloudflare Workers or Vercel that extracts HLS (`.m3u8`) URLs from VidSrc using ordinary HTTP requests and JavaScript. It does not launch Chromium or use Cloudflare Browser Run.
 
 ## Changes in this version
 
@@ -12,7 +12,7 @@ A serverless Cloudflare Worker that extracts HLS (`.m3u8`) URLs from VidSrc usin
 
 ## Setup
 
-Requirements: a Cloudflare account, Node.js 18+, and pnpm. Browser Run is not required.
+Requirements: a Cloudflare or Vercel account, Node.js 18+, and pnpm. Browser Run is not required.
 
 ```bash
 git clone https://github.com/LaganYT/vidsrc-scraper.git
@@ -42,6 +42,17 @@ pnpm deploy
 ```
 
 The `nodejs_compat` flag and compatibility date are configured in `wrangler.jsonc`.
+
+### Deploy to Vercel
+
+Import the repository into Vercel, select the `feat/fetch-only-extractor` branch,
+and deploy with the default project settings. `vercel.json` routes every public
+endpoint through the Node.js function in `api/index.js`; no build command or
+output directory is required.
+
+The extraction and proxy endpoints need no environment variables. To enable
+`/movie-subtitles`, add `TMDB_API_KEY` and `OPENSUB_API_KEY` in the Vercel
+project's Environment Variables settings.
 
 ## API
 
