@@ -8,10 +8,7 @@
     "check": "wrangler deploy --dry-run",
     "deploy": "wrangler deploy"
   },
-  "dependencies": {
-    "@cloudflare/playwright": "1.3.0",
-    "fflate": "^0.8.2"
-  },
+  "dependencies": { "fflate": "^0.8.2" },
   "devDependencies": { "wrangler": "^4.0.0" },
   "packageManager": "pnpm@11.19.0"
 }

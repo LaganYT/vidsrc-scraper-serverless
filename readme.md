@@ -1,19 +1,18 @@
-# Video Stream Extractor API — Cloudflare Workers
+# Video Stream Extractor API — Cloudflare Workers or Vercel
 
-A serverless Cloudflare Worker that extracts HLS (`.m3u8`) and subtitle URLs from VidSrc provider pages using [Cloudflare Browser Run](https://developers.cloudflare.com/browser-run/playwright/).
+A serverless API for Cloudflare Workers or Vercel that extracts HLS (`.m3u8`) URLs from VidSrc using ordinary HTTP requests and JavaScript. It does not launch Chromium or use Cloudflare Browser Run.
 
 ## Changes in this version
 
-- Replaces Express and local Chromium with a Worker `fetch()` handler and `@cloudflare/playwright`.
-- Uses one Browser Run session per extraction and two isolated browser contexts at a time.
+- Replaces browser automation with a request to the provider's stream-data API.
+- Reads the short-lived decryptor metadata returned by that API and performs the compatible ChaCha20 operation in JavaScript, without compiling WebAssembly at runtime.
 - Replaces the process-local cache with Cloudflare's Cache API (15-minute TTL).
 - Replaces Node-only TV subtitle ZIP handling with Worker-compatible Web APIs and `fflate`.
-- Preserves CORS and the extraction/subtitle routes, and adds browser-based `/watch` and `/convert` tools.
-- Closes browser sessions and contexts in `finally` blocks to prevent leaked Browser Run usage.
+- Preserves CORS, the provider-keyed extraction response, and all existing proxy/subtitle/media-page routes.
 
 ## Setup
 
-Requirements: a Cloudflare account with Browser Run enabled, Node.js 18+, and pnpm.
+Requirements: a Cloudflare or Vercel account, Node.js 18+, and pnpm. Browser Run is not required.
 
 ```bash
 git clone https://github.com/LaganYT/vidsrc-scraper.git
@@ -42,7 +41,18 @@ pnpm check
 pnpm deploy
 ```
 
-`pnpm dev` uses a remote Browser Run binding. The browser binding, `nodejs_compat` flag, and compatibility date are configured in `wrangler.jsonc`.
+The `nodejs_compat` flag and compatibility date are configured in `wrangler.jsonc`.
+
+### Deploy to Vercel
+
+Import the repository into Vercel, select the `feat/fetch-only-extractor` branch,
+and deploy with the default project settings. `vercel.json` routes every public
+endpoint through the Node.js function in `api/index.js`; no build command or
+output directory is required.
+
+The extraction and proxy endpoints need no environment variables. To enable
+`/movie-subtitles`, add `TMDB_API_KEY` and `OPENSUB_API_KEY` in the Vercel
+project's Environment Variables settings.
 
 ## API
 
@@ -99,6 +109,6 @@ Only HTTPS source URLs are accepted.
 
 ## Cloudflare usage
 
-Extraction is browser-intensive. Cloudflare's free plan has limited daily Browser Run time and browser-acquisition limits. This Worker shares one browser across provider contexts to minimize launches, but production traffic may require a paid Workers plan.
+Extraction uses regular Worker subrequests and JavaScript, so it does not consume Browser Run minutes or require runtime WebAssembly compilation. The upstream stream-data API and its decryptor metadata are provider-controlled and may change independently.
 
 Make sure your deployment and use comply with provider terms and applicable copyright laws.
